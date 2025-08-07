@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Jardín de Bienestar</title>
+    <!-- Incluimos Tailwind CSS para el diseño -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Incluimos React y ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <!-- Incluimos Babel para que el navegador entienda el código React -->
+    <script crossorigin src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <!-- Incluimos Firebase y Firestore (versión compatible con global scope) -->
+    <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-app.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-auth.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-firestore.js"></script>
+    <style>
+        /* Estilo para una animación de carga simple */
+        @keyframes pulse-fast {
+            0%, 100% {
+                opacity: 1;
+            }
+            50% {
+                opacity: .5;
+            }
+        }
+        .animate-pulse-fast {
+            animation: pulse-fast 1.5s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+        }
+    </style>
+</head>
+<body class="bg-slate-50 text-slate-800">
+    <div id="root" class="flex items-center justify-center min-h-screen"></div>
+
+    <!-- Todo el código de React en una única sección, para evitar problemas de importación -->
+    <script type="text/babel">
+        // Variables globales para Firebase (no las edites)
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : undefined;
+
+        function App() {
+            // --- Estado de la aplicación ---
+            const [view, setView] = React.useState('welcome');
+            const [questions, setQuestions] = React.useState([]);
+            const [currentQuestionIndex, setCurrentQuestionIndex] = React.useState(0);
+            const [wellbeingScore, setWellbeingScore] = React.useState(50);
+            const [isAuthReady, setIsAuthReady] = React.useState(false);
+            const [userId, setUserId] = React.useState(null);
+            const [db, setDb] = React.useState(null);
+            const [auth, setAuth] = React.useState(null);
+            const [dashboardData, setDashboardData] = React.useState([]);
+            const [isHRAuthenticated, setIsHRAuthenticated] = React.useState(false);
+            const [lastResponseDate, setLastResponseDate] = React.useState(null);
+
+            // --- Inicialización y Autenticación de Firebase ---
+            React.useEffect(() => {
+                const initializeFirebase = async () => {
+                    try {
+                        const app = firebase.initializeApp(firebaseConfig);
+                        const firestore = firebase.firestore();
+                        const authInstance = firebase.auth();
+
+                        setDb(firestore);
+                        setAuth(authInstance);
+
+                        firebase.auth().onAuthStateChanged(async (user) => {
+                            if (user) {
+                                setUserId(user.uid);
+                                setIsAuthReady(true);
+                                const userMetadataRef = firestore.collection('artifacts').doc(appId).collection('users').doc(user.uid).collection('metadata').doc('last_response');
+                                const docSnap = await userMetadataRef.get();
+                                if (docSnap.exists) {
+                                    setLastResponseDate(docSnap.data().timestamp.toDate());
+                                }
+                            } else {
+                                if (initialAuthToken) {
+                                    await authInstance.signInWithCustomToken(initialAuthToken);
+                                } else {
+                                    await authInstance.signInAnonymously();
+                                }
+                            }
+                        });
+                    } catch (error) {
+                        console.error("Error initializing Firebase:", error);
+                    }
+                };
+                initializeFirebase();
+            }, []);
+
+            // --- Obtener datos del Panel de Control ---
+            React.useEffect(() => {
+                if (isAuthReady && db) {
+                    const dashboardRef = db.collection('artifacts').doc(appId).collection('public').doc('data').collection('dashboard');
+                    
+                    const unsubscribe = dashboardRef.onSnapshot((snapshot) => {
+                        const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                        setDashboardData(data);
+                        console.log("Dashboard data fetched:", data);
+                    }, (error) => {
+                        console.error("Error fetching dashboard data:", error);
+                    });
+
+                    return () => unsubscribe();
+                }
+            }, [isAuthReady, db]);
+
+            // --- Lógica del juego ---
+            const startNewSession = () => {
+                if (lastResponseDate) {
+                    const now = new Date();
+                    const timeSinceLastResponse = now.getTime() - lastResponseDate.getTime();
+                    const hoursSinceLastResponse = timeSinceLastResponse / (1000 * 60 * 60);
+                    if (hoursSinceLastResponse < 24) {
+                        setView('dailyLimitReached');
+                        return;
+                    }
+                }
+
+                const allQuestions = [
+                    { id: 'q1', text: 'Si tuvieras que describir tu día con un clima, ¿cuál sería?', type: 'choice', options: ['Soleado y despejado', 'Con algunas nubes', 'Lluvioso', 'Tormenta eléctrica'] },
+                    { id: 'q2', text: '¿Cómo se siente tu "batería" de energía hoy?', type: 'choice', options: ['Llena', 'A la mitad', 'Casi vacía', 'Necesito un cargador urgente'] },
+                    { id: 'q3', text: 'El trabajo en equipo hoy se sintió como...', type: 'choice', options: ['Una orquesta sinfónica', 'Un partido de jazz', 'Una banda de rock ensayando', 'Ruido de estática'] },
+                    { id: 'q4', text: '¿Qué superpoder te habría sido más útil esta semana?', type: 'open' },
+                    { id: 'q5', text: 'Imagina que tus tareas son maletas. ¿Cuántas sientes que cargas ahora?', type: 'choice', options: ['Una mochila ligera', 'Un par de maletas', 'Equipaje para un mes', 'Estoy en plena mudanza'] },
+                    { id: 'q6', text: 'Al final del día, ¿lograste "cerrar la puerta" de la oficina?', type: 'choice', options: ['Sí, completamente', 'Más o menos', 'No, me llevé trabajo a casa', '¿Qué es cerrar la puerta?'] },
+                    { id: 'q7', text: 'Si tu líder fuera un guía de viaje, ¿cómo describirías su estilo?', type: 'choice', options: ['Con un mapa claro', 'Explorador y flexible', 'Con prisa por llegar', 'Un poco perdido'] },
+                    { id: 'q8', text: '¿Hubo algo esta semana, por pequeño que sea, que te hizo sentir orgullo?', type: 'open' },
+                ];
+                const newQuestions = [...allQuestions].sort(() => 0.5 - Math.random()).slice(0, 3);
+                
+                setQuestions(newQuestions);
+                setCurrentQuestionIndex(0);
+                setWellbeingScore(50);
+                setView('game');
+            };
+
+            const processAnswer = async (answer) => {
+                const question = questions[currentQuestionIndex];
+                
+                if (question.type === 'choice') {
+                    const scoreChange = calculateScore(question.options.indexOf(answer), question.options.length);
+                    setWellbeingScore(prevScore => Math.max(0, Math.min(100, prevScore + scoreChange)));
+                }
+                
+                if (answer && isAuthReady && db && userId) {
+                    try {
+                        const responseRef = db.collection('artifacts').doc(appId).collection('public').doc('data').collection('dashboard').doc(question.id);
+                        const docSnap = await responseRef.get();
+                        const currentData = docSnap.exists ? docSnap.data() : { questionText: question.text, answers: {} };
+                        const newAnswers = { ...currentData.answers };
+                        newAnswers[answer] = (newAnswers[answer] || 0) + 1;
+                        await responseRef.set({ questionText: question.text, answers: newAnswers }, { merge: true });
+
+                        const privateResponsesRef = db.collection('artifacts').doc(appId).collection('users').doc(userId).collection('responses');
+                        await privateResponsesRef.add({
+                            questionText: question.text,
+                            answer,
+                            timestamp: new Date().toISOString(),
+                            userId,
+                        });
+                        console.log("User response saved to Firestore.");
+
+                    } catch (error) {
+                        console.error("Error saving data to Firestore:", error);
+                    }
+                } else if (!answer) {
+                    console.log("Question was skipped, no data saved to dashboard.");
+                }
+
+                if (currentQuestionIndex + 1 < questions.length) {
+                    setCurrentQuestionIndex(prevIndex => prevIndex + 1);
+                } else {
+                    if (isAuthReady && db && userId) {
+                        const userMetadataRef = db.collection('artifacts').doc(appId).collection('users').doc(userId).collection('metadata').doc('last_response');
+                        await userMetadataRef.set({ timestamp: new Date() });
+                        setLastResponseDate(new Date());
+                    }
+                    setView('completion');
+                }
+            };
+
+            const skipQuestion = async () => {
+                if (currentQuestionIndex + 1 < questions.length) {
+                    setCurrentQuestionIndex(prevIndex => prevIndex + 1);
+                } else {
+                    if (isAuthReady && db && userId) {
+                        const userMetadataRef = db.collection('artifacts').doc(appId).collection('users').doc(userId).collection('metadata').doc('last_response');
+                        await userMetadataRef.set({ timestamp: new Date() });
+                        setLastResponseDate(new Date());
+                    }
+                    setView('completion');
+                }
+            };
+
+            // --- Lógica visual ---
+            const calculateScore = (selectedIndex, totalOptions) => {
+                const scoreStep = 50 / (totalOptions - 1);
+                return 25 - (selectedIndex * scoreStep);
+            };
+
+            const getPlantSVG = () => {
+                const plantSVGs = {
+                    sad: `<svg width="100" height="100" viewBox="0 0 200 200"><path d="M100 180 Q110 150 100 110 Q90 150 100 180" fill="#8B4513"/><path d="M100 110 C 95 95, 95 70, 100 50 C 105 70, 105 95, 100 110" fill="#A9A9A9"/><path d="M100 80 C 110 85, 115 95, 110 105 C 105 100, 105 90, 100 80" fill="#A9A9A9" transform="rotate(15 100 100)"/><path d="M100 80 C 90 85, 85 95, 90 105 C 95 100, 95 90, 100 80" fill="#A9A9A9" transform="rotate(-15 100 100)"/></svg>`,
+                    neutral: `<svg width="120" height="120" viewBox="0 0 200 200"><path d="M100 180 Q120 140 100 100 Q80 140 100 180" fill="#8B4513"/><path d="M100 100 C 90 80, 90 50, 100 30 C 110 50, 110 80, 100 100" fill="#8BC34A"/><path d="M100 70 C 120 70, 130 90, 120 100 C 110 95, 110 80, 100 70" fill="#8BC34A"/><path d="M100 70 C 80 70, 70 90, 80 100 C 90 95, 90 80, 100 70" fill="#8BC34A"/></svg>`,
+                    happy: `<svg width="150" height="150" viewBox="0 0 200 200"><path d="M100 180 Q120 140 100 100 Q80 140 100 180" fill="#8B4513"/><path d="M100 100 C 80 80, 80 40, 100 20 C 120 40, 120 80, 100 100" fill="#4CAF50"/><path d="M100 60 C 130 60, 140 80, 140 100 C 120 100, 110 80, 100 60" fill="#4CAF50"/><path d="M100 60 C 70 60, 60 80, 60 100 C 80 100, 90 80, 100 60" fill="#4CAF50"/></svg>`
+                };
+                if (wellbeingScore > 75) return plantSVGs.happy;
+                if (wellbeingScore > 40) return plantSVGs.neutral;
+                return plantSVGs.sad;
+            };
+
+            const getPlantScale = () => {
+                return 1 + (wellbeingScore - 50) / 100;
+            };
+
+            const renderQuestion = () => {
+                if (questions.length === 0) return <p className="text-center text-slate-500 italic">Cargando preguntas...</p>;
+                const question = questions[currentQuestionIndex];
+                return (
+                    <div className="flex flex-col flex-grow justify-center">
+                        <h2 className="text-xl font-medium text-center text-slate-700 mb-5">{question.text}</h2>
+                        {question.type === 'choice' && (
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                {question.options.map((option, index) => (
+                                    <button
+                                        key={index}
+                                        onClick={() => processAnswer(option)}
+                                        className="w-full bg-slate-100 text-slate-700 p-3 rounded-lg hover:bg-emerald-100 hover:font-semibold transition-all duration-200"
+                                    >
+                                        {option}
+                                    </button>
+                                ))}
+                            </div>
+                        )}
+                        {question.type === 'open' && (
+                            <div className="flex flex-col">
+                                <textarea
+                                    id="open-answer"
+                                    className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
+                                    placeholder="Tu respuesta honesta es valiosa..."
+                                    rows="4"
+                                ></textarea>
+                                <button
+                                    onClick={() => {
+                                        const answer = document.getElementById('open-answer').value;
+                                        if (answer.trim()) processAnswer(answer);
+                                    }}
+                                    className="mt-4 w-full bg-emerald-600 text-white font-bold py-2 px-4 rounded-full hover:bg-emerald-700 transition-all"
+                                >
+                                    Enviar
+                                </button>
+                            </div>
+                        )}
+                        <button
+                            onClick={skipQuestion}
+                            className="mt-4 w-full bg-slate-200 text-slate-700 font-bold py-2 px-4 rounded-full hover:bg-slate-300 transition-all"
+                        >
+                            Saltar pregunta
+                        </button>
+                    </div>
+                );
+            };
+
+            const renderProgressDots = () => {
+                return questions.map((_, index) => (
+                    <div
+                        key={index}
+                        className={`w-3 h-3 rounded-full transition-all ${index <= currentQuestionIndex ? 'bg-emerald-500' : 'bg-slate-300'}`}
+                    ></div>
+                ));
+            };
+
+            const HRLoginView = () => {
+                const [password, setPassword] = React.useState('');
+                const [error, setError] = React.useState('');
+
+                const handleLogin = (e) => {
+                    e.preventDefault();
+                    if (password === 'RRHH_2025') {
+                        setIsHRAuthenticated(true);
+                        setView('dashboard');
+                        setError('');
+                    } else {
+                        setError('Contraseña incorrecta. Inténtalo de nuevo.');
+                    }
+                };
+
+                return (
+                    <div className="text-center p-8 bg-white rounded-2xl shadow-lg">
+                        <h2 className="text-2xl font-bold text-emerald-800">Acceso al Panel de Bienestar</h2>
+                        <p className="mt-4 text-slate-600 text-sm">Ingresa la contraseña para ver los datos agregados.</p>
+                        <form onSubmit={handleLogin} className="mt-6 flex flex-col items-center">
+                            <input
+                                type="password"
+                                value={password}
+                                onChange={(e) => setPassword(e.target.value)}
+                                placeholder="Contraseña"
+                                className="w-full max-w-xs p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 text-center"
+                            />
+                            {error && <p className="text-red-500 text-sm mt-2">{error}</p>}
+                            <button
+                                type="submit"
+                                className="mt-4 bg-emerald-600 text-white font-bold py-2 px-6 rounded-full hover:bg-emerald-700 transition-all"
+                            >
+                                Ingresar
+                            </button>
+                        </form>
+                        <button
+                            onClick={() => setView('welcome')}
+                            className="mt-4 bg-slate-200 text-slate-700 font-bold py-2 px-6 rounded-full hover:bg-slate-300 transition-all"
+                        >
+                            Volver
+                        </button>
+                    </div>
+                );
+            };
+
+            const renderDashboard = () => {
+                if (!isHRAuthenticated) {
+                    return <HRLoginView />;
+                }
+                
+                if (dashboardData.length === 0) {
+                    return <p className="text-center text-slate-500 italic">Cargando datos del panel...</p>;
+                }
+
+                return (
+                    <div className="p-4 rounded-2xl shadow-lg bg-white overflow-y-auto max-h-[80vh]">
+                        <h2 className="text-2xl font-bold text-emerald-800 mb-4">Panel de Bienestar</h2>
+                        <p className="text-slate-600 mb-6">Visualización de las respuestas anónimas de todos los usuarios.</p>
+                        {dashboardData.map((item, index) => (
+                            <div key={index} className="mb-8 p-4 bg-slate-50 rounded-xl">
+                                <h3 className="text-lg font-semibold text-slate-700 mb-2">{item.questionText}</h3>
+                                <div className="overflow-x-auto">
+                                    <table className="min-w-full bg-white rounded-lg overflow-hidden shadow-sm">
+                                        <thead className="bg-emerald-100">
+                                            <tr>
+                                                <th className="py-2 px-4 text-left text-sm font-semibold text-emerald-800 uppercase tracking-wider">Opción</th>
+                                                <th className="py-2 px-4 text-left text-sm font-semibold text-emerald-800 uppercase tracking-wider">Cantidad de Votos</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody className="divide-y divide-gray-200">
+                                            {Object.entries(item.answers).map(([answer, count]) => (
+                                                <tr key={answer} className="hover:bg-gray-50">
+                                                    <td className="py-3 px-4 whitespace-nowrap text-sm font-medium text-slate-800">{answer}</td>
+                                                    <td className="py-3 px-4 whitespace-nowrap text-sm text-slate-600">{count}</td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        ))}
+                        <button
+                            onClick={() => { setIsHRAuthenticated(false); setView('welcome'); }}
+                            className="mt-6 bg-red-500 text-white font-bold py-2 px-6 rounded-full hover:bg-red-600 transition-all"
+                        >
+                            Cerrar sesión
+                        </button>
+                    </div>
+                );
+            };
+
+            // --- Renderizado principal de la UI ---
+            const renderApp = () => {
+                switch (view) {
+                    case 'welcome':
+                        return (
+                            <div id="welcome-view" className="text-center p-8 bg-white rounded-2xl shadow-lg">
+                                <h1 className="text-3xl font-extrabold text-emerald-700">Reflexiona y crece</h1>
+                                <h2 className="text-2xl font-bold text-emerald-800 mt-2">Bienvenido a tu Jardín de Bienestar</h2>
+                                <p className="mt-4 text-slate-600 text-sm">Este es un espacio para reflexionar sobre tu día. Tus respuestas son completamente anónimas y se guardarán para un análisis colectivo.</p>
+                                <p className="mt-2 text-slate-500 text-xs">Tu identificador de usuario anónimo es: **{userId || 'Cargando...'}**</p>
+                                <button
+                                    onClick={startNewSession}
+                                    className="mt-6 bg-emerald-600 text-white font-bold py-2 px-6 rounded-full hover:bg-emerald-700 transition-all"
+                                >
+                                    Comenzar
+                                </button>
+                                <button
+                                    onClick={() => setView('hr-login')}
+                                    className="mt-4 bg-slate-200 text-slate-700 font-bold py-2 px-6 rounded-full hover:bg-slate-300 transition-all"
+                                >
+                                    Ver Panel
+                                </button>
+                            </div>
+                        );
+                    case 'game':
+                        return (
+                            <div id="game-view" className="flex flex-col h-full">
+                                <header className="text-center mb-6">
+                                    <h1 className="text-3xl font-bold text-emerald-800">Jardín de Bienestar</h1>
+                                    <p className="text-slate-500 mt-1">Un momento para cuidar de ti.</p>
+                                </header>
+                                <div className="flex justify-center items-end h-48 mb-6">
+                                    <div
+                                        dangerouslySetInnerHTML={{ __html: getPlantSVG() }}
+                                        style={{ transform: `scale(${getPlantScale()})` }}
+                                        className="transition-transform duration-500"
+                                    ></div>
+                                </div>
+                                <div className="bg-white p-6 rounded-2xl shadow-lg flex-grow flex flex-col">
+                                    {renderQuestion()}
+                                </div>
+                                <div className="flex justify-center space-x-2 mt-6">
+                                    {renderProgressDots()}
+                                </div>
+                            </div>
+                        );
+                    case 'completion':
+                        return (
+                            <div id="completion-view" className="text-center p-8 bg-white rounded-2xl shadow-lg">
+                                <h2 className="text-2xl font-bold text-emerald-800">¡Gracias por tu tiempo! 🌱</h2>
+                                <p className="mt-2 text-slate-600">Tu reflexión es valiosa y ha sido registrada de forma anónima.</p>
+                                <button
+                                    onClick={() => setView('welcome')}
+                                    className="mt-6 bg-emerald-600 text-white font-bold py-2 px-6 rounded-full hover:bg-emerald-700 transition-all"
+                                >
+                                    Volver al inicio
+                                </button>
+                                <button
+                                    onClick={() => setView('hr-login')}
+                                    className="mt-4 bg-slate-200 text-slate-700 font-bold py-2 px-6 rounded-full hover:bg-slate-300 transition-all"
+                                >
+                                    Ver Panel
+                                </button>
+                            </div>
+                        );
+                    case 'hr-login':
+                        return <HRLoginView />;
+                    case 'dashboard':
+                        return renderDashboard();
+                    case 'dailyLimitReached':
+                        return (
+                            <div id="daily-limit-view" className="text-center p-8 bg-white rounded-2xl shadow-lg">
+                                <h2 className="text-2xl font-bold text-emerald-800">¡Ya has completado tu reflexión de hoy!</h2>
+                                <p className="mt-4 text-slate-600">Regresa mañana para ver crecer tu jardín. ¡Tu bienestar es importante!</p>
+                                <button
+                                    onClick={() => setView('welcome')}
+                                    className="mt-6 bg-emerald-600 text-white font-bold py-2 px-6 rounded-full hover:bg-emerald-700 transition-all"
+                                >
+                                    Volver al inicio
+                                </button>
+                            </div>
+                        );
+                    default:
+                        return null;
+                }
+            };
+
+            return (
+                <div className="w-full max-w-md mx-auto p-4">
+                    {!isAuthReady && (
+                        <div className="text-center p-8">
+                            <div className="inline-block h-12 w-12 rounded-full bg-emerald-500 animate-pulse-fast"></div>
+                            <p className="text-lg text-slate-600 mt-4">Cargando tu Jardín de Bienestar...</p>
+                        </div>
+                    )}
+                    {isAuthReady && renderApp()}
+                </div>
+            );
+        }
+
+        // Renderizamos la aplicación en el div 'root'
+        ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+    </script>
+</body>
+</html>
